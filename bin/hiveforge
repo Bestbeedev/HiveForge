@@ -1,0 +1,147 @@
+#!/usr/bin/env bash
+# HiveForge — assemble a self-contained hiveforge/ instance (core + stack adapter) into a project.
+# Zero dependencies. Compatible with bash 3.2 (macOS default).
+
+set -euo pipefail
+
+HIVEFORGE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+VERSION="$(cat "$HIVEFORGE_ROOT/VERSION" 2>/dev/null || echo "dev")"
+
+usage() {
+  cat <<EOF
+HiveForge $VERSION
+
+Usage:
+  hiveforge init    --stack <stack> [--dir <project-dir>]
+  hiveforge upgrade --stack <stack> [--dir <project-dir>]
+  hiveforge list
+  hiveforge build
+  hiveforge help
+
+Commands:
+  init      Create <dir>/hiveforge/ (agents, protocols, stack rules, docs templates, config, prompts).
+            Refuses to run if <dir>/hiveforge/ already exists.
+  upgrade   Refresh agents/, protocols/, stack.md, PROMPTS.md and README.md.
+            Never touches config.md or docs/ (project data).
+  list      List available stacks.
+  build     Regenerate kits/<stack>/hiveforge/ for every stack (ready-to-copy folders).
+            Run it after editing core/, stacks/ or templates/.
+
+Options:
+  --stack   One of the stacks listed by 'hiveforge list'.
+  --dir     Target project directory (default: current directory).
+EOF
+}
+
+die() { echo "hiveforge: $*" >&2; exit 1; }
+
+list_stacks() {
+  for d in "$HIVEFORGE_ROOT"/stacks/*/; do
+    basename "$d"
+  done
+}
+
+# Replace template placeholders. Delimiter '|' is safe: values never contain it.
+render() {
+  local src="$1" dst="$2"
+  sed -e "s|{{STACK}}|$STACK|g" \
+      -e "s|{{VERSION}}|$VERSION|g" \
+      -e "s|{{DATE}}|$(date +%Y-%m-%d)|g" \
+      "$src" > "$dst"
+}
+
+# Files owned by HiveForge (safe to overwrite on upgrade).
+install_framework_files() {
+  local target="$1"
+  mkdir -p "$target/agents" "$target/protocols"
+
+  cp "$HIVEFORGE_ROOT"/core/agents/*.agent.md "$target/agents/"
+  cp "$HIVEFORGE_ROOT/stacks/$STACK/louis.agent.md" "$target/agents/louis.agent.md"
+  cp "$HIVEFORGE_ROOT"/core/protocols/*.md "$target/protocols/"
+  cp "$HIVEFORGE_ROOT/stacks/$STACK/stack.config.md" "$target/stack.md"
+
+  render "$HIVEFORGE_ROOT/templates/PROMPTS.md" "$target/PROMPTS.md"
+  render "$HIVEFORGE_ROOT/templates/README.md" "$target/README.md"
+  echo "$VERSION" > "$target/.version"
+}
+
+# Files owned by the project (created once, never overwritten).
+install_project_files() {
+  local target="$1"
+  mkdir -p "$target/docs"
+  cp "$HIVEFORGE_ROOT"/core/templates/*.md "$target/docs/"
+  render "$HIVEFORGE_ROOT/templates/project-config.md" "$target/config.md"
+}
+
+COMMAND="${1:-help}"
+[ $# -gt 0 ] && shift
+
+STACK=""
+DIR="."
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --stack) [ $# -ge 2 ] || die "--stack requires a value"; STACK="$2"; shift 2 ;;
+    --stack=*) STACK="${1#*=}"; shift ;;
+    --dir) [ $# -ge 2 ] || die "--dir requires a value"; DIR="$2"; shift 2 ;;
+    --dir=*) DIR="${1#*=}"; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) die "unknown option: $1 (see 'hiveforge help')" ;;
+  esac
+done
+
+require_stack() {
+  [ -n "$STACK" ] || die "--stack is required. Available: $(list_stacks | tr '\n' ' ')"
+  [ -d "$HIVEFORGE_ROOT/stacks/$STACK" ] || die "unknown stack '$STACK'. Available: $(list_stacks | tr '\n' ' ')"
+  [ -d "$DIR" ] || die "directory not found: $DIR"
+}
+
+case "$COMMAND" in
+  init)
+    require_stack
+    TARGET="$DIR/hiveforge"
+    [ ! -e "$TARGET" ] || die "$TARGET already exists. Use 'hiveforge upgrade' to refresh agents without touching docs/."
+    install_framework_files "$TARGET"
+    install_project_files "$TARGET"
+    cat <<EOF
+HiveForge $VERSION initialised in $TARGET (stack: $STACK)
+
+Next steps:
+  1. Fill $TARGET/config.md and $TARGET/docs/PROJECT.md
+  2. In your AI assistant:  @marco Initialise le projet.
+  3. Commit hiveforge/ with your project (it must never contain secrets).
+EOF
+    ;;
+  upgrade)
+    require_stack
+    TARGET="$DIR/hiveforge"
+    [ -d "$TARGET" ] || die "$TARGET not found. Run 'hiveforge init' first."
+    CURRENT="$(cat "$TARGET/.version" 2>/dev/null || echo "unknown")"
+    install_framework_files "$TARGET"
+    # Add any doc template introduced by a newer HiveForge version, without overwriting existing docs.
+    mkdir -p "$TARGET/docs"
+    for f in "$HIVEFORGE_ROOT"/core/templates/*.md; do
+      [ -e "$TARGET/docs/$(basename "$f")" ] || cp "$f" "$TARGET/docs/"
+    done
+    echo "HiveForge upgraded in $TARGET: $CURRENT -> $VERSION (stack: $STACK). config.md and docs/ untouched."
+    ;;
+  list)
+    list_stacks
+    ;;
+  build)
+    KITS="$HIVEFORGE_ROOT/kits"
+    for STACK in $(list_stacks); do
+      rm -rf "$KITS/$STACK"
+      mkdir -p "$KITS/$STACK"
+      install_framework_files "$KITS/$STACK/hiveforge"
+      install_project_files "$KITS/$STACK/hiveforge"
+      echo "kits/$STACK/hiveforge"
+    done
+    ;;
+  help|-h|--help)
+    usage
+    ;;
+  *)
+    usage
+    exit 1
+    ;;
+esac
